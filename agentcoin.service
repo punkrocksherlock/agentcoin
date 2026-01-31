@@ -1,0 +1,16 @@
+[Unit]
+Description=AgentCoin MVP - Proof of Useful Inference
+After=network.target
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=/home/ec2-user/clawd/projects/agent-coin
+ExecStart=/usr/bin/node src/index.js
+Restart=on-failure
+RestartSec=5
+Environment=NODE_ENV=production
+Environment=AGENTCOIN_PORT=3141
+
+[Install]
+WantedBy=multi-user.target
