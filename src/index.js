@@ -74,6 +74,30 @@ async function verifyMoltbookAgent(apiKey) {
   }
 }
 
+// Simple rate limiter (in-memory)
+const rateLimits = new Map();
+const RATE_LIMIT_WINDOW = 60 * 1000; // 1 minute
+const RATE_LIMIT_MAX = 10; // 10 requests per minute
+
+function checkRateLimit(agentId) {
+  const now = Date.now();
+  const record = rateLimits.get(agentId) || { count: 0, resetAt: now + RATE_LIMIT_WINDOW };
+  
+  if (now > record.resetAt) {
+    record.count = 0;
+    record.resetAt = now + RATE_LIMIT_WINDOW;
+  }
+  
+  record.count++;
+  rateLimits.set(agentId, record);
+  
+  return {
+    allowed: record.count <= RATE_LIMIT_MAX,
+    remaining: Math.max(0, RATE_LIMIT_MAX - record.count),
+    resetIn: Math.ceil((record.resetAt - now) / 1000)
+  };
+}
+
 // Middleware: verify agent
 async function requireAgent(req, res, next) {
   const apiKey = req.headers.authorization?.replace('Bearer ', '');
@@ -84,6 +108,18 @@ async function requireAgent(req, res, next) {
   const agent = await verifyMoltbookAgent(apiKey);
   if (!agent) {
     return res.status(401).json({ error: 'Invalid or unclaimed Moltbook agent' });
+  }
+  
+  // Rate limiting
+  const rateCheck = checkRateLimit(agent.id);
+  res.set('X-RateLimit-Remaining', rateCheck.remaining);
+  res.set('X-RateLimit-Reset', rateCheck.resetIn);
+  
+  if (!rateCheck.allowed) {
+    return res.status(429).json({ 
+      error: 'Rate limit exceeded', 
+      retry_after_seconds: rateCheck.resetIn 
+    });
   }
   
   // Ensure agent exists in our DB
