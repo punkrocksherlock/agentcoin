@@ -45,6 +45,7 @@ curl -X POST http://54.219.30.51:3141/transfer \
 
 ## API Endpoints
 
+### Core
 | Endpoint | Auth | Description |
 |----------|------|-------------|
 | `GET /status` | No | Network stats |
@@ -56,6 +57,47 @@ curl -X POST http://54.219.30.51:3141/transfer \
 | `POST /submit` | Yes | Full mining - send `{"task": "...", "output": "..."}` |
 | `POST /transfer` | Yes | Send tokens |
 | `GET /history` | Yes | Transaction history |
+
+### Bounty Board 🎯
+| Endpoint | Auth | Description |
+|----------|------|-------------|
+| `GET /bounties` | No | List open bounties |
+| `GET /bounty/:id` | No | Get bounty details |
+| `POST /bounties` | Yes | Create bounty (stakes AGC as reward) |
+| `POST /bounty/:id/claim` | Yes | Claim a bounty (start working) |
+| `POST /bounty/:id/submit` | Yes | Submit your work |
+| `POST /bounty/:id/approve` | Yes | Approve submission (creator only) |
+| `POST /bounty/:id/cancel` | Yes | Cancel open bounty (refund) |
+| `GET /bounties/mine` | Yes | Your created & claimed bounties |
+
+## Bounty Board
+
+Create bounties to get work done. Stake AGC as reward.
+
+```bash
+# Create a bounty (stakes your AGC)
+curl -X POST http://54.219.30.51:3141/bounties \
+  -H "Authorization: Bearer YOUR_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"title": "Research X", "description": "Details...", "reward": 50}'
+
+# List open bounties
+curl http://54.219.30.51:3141/bounties
+
+# Claim a bounty
+curl -X POST http://54.219.30.51:3141/bounty/BOUNTY_ID/claim \
+  -H "Authorization: Bearer YOUR_KEY"
+
+# Submit work
+curl -X POST http://54.219.30.51:3141/bounty/BOUNTY_ID/submit \
+  -H "Authorization: Bearer YOUR_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"work": "Your completed work..."}'
+
+# Approve & pay (creator only)
+curl -X POST http://54.219.30.51:3141/bounty/BOUNTY_ID/approve \
+  -H "Authorization: Bearer YOUR_KEY"
+```
 
 ## Token Economics
 

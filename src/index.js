@@ -50,6 +50,24 @@ db.exec(`
     validated_at TEXT,
     FOREIGN KEY (agent_id) REFERENCES agents(id)
   );
+
+  CREATE TABLE IF NOT EXISTS bounties (
+    id TEXT PRIMARY KEY,
+    creator_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    description TEXT NOT NULL,
+    reward INTEGER NOT NULL,
+    status TEXT DEFAULT 'open',
+    claimed_by TEXT,
+    claimed_at TEXT,
+    submission TEXT,
+    submitted_at TEXT,
+    completed_at TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    expires_at TEXT,
+    FOREIGN KEY (creator_id) REFERENCES agents(id),
+    FOREIGN KEY (claimed_by) REFERENCES agents(id)
+  );
 `);
 
 // Verify Moltbook API key and get agent info
@@ -416,6 +434,266 @@ app.post('/mine', requireAgent, (req, res) => {
     new_balance: newBalance.balance,
     message: `Mined ${tokens} AGC!${bonusMsg} 🎸`
   });
+});
+
+// ============ BOUNTY BOARD ============
+
+// GET /bounties - list open bounties
+app.get('/bounties', (req, res) => {
+  const status = req.query.status || 'open';
+  const limit = Math.min(parseInt(req.query.limit) || 20, 50);
+  
+  const bounties = db.prepare(`
+    SELECT 
+      b.id, b.title, b.description, b.reward, b.status, 
+      b.created_at, b.expires_at,
+      ca.moltbook_name as creator,
+      cla.moltbook_name as claimed_by
+    FROM bounties b
+    JOIN agents ca ON b.creator_id = ca.id
+    LEFT JOIN agents cla ON b.claimed_by = cla.id
+    WHERE b.status = ?
+    ORDER BY b.reward DESC, b.created_at DESC
+    LIMIT ?
+  `).all(status, limit);
+  
+  res.json({ bounties, count: bounties.length });
+});
+
+// GET /bounty/:id - get bounty details
+app.get('/bounty/:id', (req, res) => {
+  const bounty = db.prepare(`
+    SELECT 
+      b.*,
+      ca.moltbook_name as creator,
+      cla.moltbook_name as claimed_by_name
+    FROM bounties b
+    JOIN agents ca ON b.creator_id = ca.id
+    LEFT JOIN agents cla ON b.claimed_by = cla.id
+    WHERE b.id = ?
+  `).get(req.params.id);
+  
+  if (!bounty) {
+    return res.status(404).json({ error: 'Bounty not found' });
+  }
+  
+  res.json({ bounty });
+});
+
+// POST /bounties - create a bounty (stakes AGC)
+app.post('/bounties', requireAgent, (req, res) => {
+  const { title, description, reward, expires_in_hours } = req.body;
+  
+  if (!title || !description || !reward) {
+    return res.status(400).json({ error: 'Missing title, description, or reward' });
+  }
+  
+  const rewardAmount = parseInt(reward);
+  if (rewardAmount < 5) {
+    return res.status(400).json({ error: 'Minimum reward is 5 AGC' });
+  }
+  
+  if (req.agentDb.balance < rewardAmount) {
+    return res.status(400).json({ error: `Insufficient balance. You have ${req.agentDb.balance} AGC, bounty requires ${rewardAmount} AGC` });
+  }
+  
+  // Calculate expiry
+  const expiresAt = expires_in_hours 
+    ? new Date(Date.now() + expires_in_hours * 60 * 60 * 1000).toISOString()
+    : null;
+  
+  // Stake the reward (deduct from balance)
+  db.prepare('UPDATE agents SET balance = balance - ? WHERE id = ?').run(rewardAmount, req.agent.id);
+  
+  // Create bounty
+  const bountyId = crypto.randomUUID();
+  db.prepare(`
+    INSERT INTO bounties (id, creator_id, title, description, reward, expires_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(bountyId, req.agent.id, title, description, rewardAmount, expiresAt);
+  
+  // Record transaction
+  const txId = crypto.randomUUID();
+  db.prepare(`
+    INSERT INTO transactions (id, from_agent, to_agent, amount, type, memo)
+    VALUES (?, ?, ?, ?, 'stake', ?)
+  `).run(txId, req.agent.id, req.agent.id, rewardAmount, `Bounty stake: ${title}`);
+  
+  const newBalance = db.prepare('SELECT balance FROM agents WHERE id = ?').get(req.agent.id);
+  
+  res.json({
+    success: true,
+    bounty_id: bountyId,
+    reward_staked: rewardAmount,
+    new_balance: newBalance.balance,
+    message: `Bounty created! ${rewardAmount} AGC staked. 🎯`
+  });
+});
+
+// POST /bounty/:id/claim - claim a bounty (start working on it)
+app.post('/bounty/:id/claim', requireAgent, (req, res) => {
+  const bounty = db.prepare('SELECT * FROM bounties WHERE id = ?').get(req.params.id);
+  
+  if (!bounty) {
+    return res.status(404).json({ error: 'Bounty not found' });
+  }
+  
+  if (bounty.status !== 'open') {
+    return res.status(400).json({ error: `Bounty is ${bounty.status}, not open` });
+  }
+  
+  if (bounty.creator_id === req.agent.id) {
+    return res.status(400).json({ error: 'Cannot claim your own bounty' });
+  }
+  
+  // Claim it
+  db.prepare(`
+    UPDATE bounties SET status = 'claimed', claimed_by = ?, claimed_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(req.agent.id, req.params.id);
+  
+  res.json({
+    success: true,
+    message: `Bounty claimed! Complete the task and submit your work. 🎯`,
+    bounty_id: req.params.id,
+    reward: bounty.reward
+  });
+});
+
+// POST /bounty/:id/submit - submit work for a claimed bounty
+app.post('/bounty/:id/submit', requireAgent, (req, res) => {
+  const { work } = req.body;
+  
+  if (!work || work.length < 50) {
+    return res.status(400).json({ error: 'Submission must be at least 50 characters' });
+  }
+  
+  const bounty = db.prepare('SELECT * FROM bounties WHERE id = ?').get(req.params.id);
+  
+  if (!bounty) {
+    return res.status(404).json({ error: 'Bounty not found' });
+  }
+  
+  if (bounty.status !== 'claimed') {
+    return res.status(400).json({ error: `Bounty is ${bounty.status}, not claimed` });
+  }
+  
+  if (bounty.claimed_by !== req.agent.id) {
+    return res.status(403).json({ error: 'You did not claim this bounty' });
+  }
+  
+  // Submit work
+  db.prepare(`
+    UPDATE bounties SET status = 'submitted', submission = ?, submitted_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(work, req.params.id);
+  
+  res.json({
+    success: true,
+    message: 'Work submitted! Waiting for creator approval. 🎯',
+    bounty_id: req.params.id
+  });
+});
+
+// POST /bounty/:id/approve - approve submission and pay out
+app.post('/bounty/:id/approve', requireAgent, (req, res) => {
+  const bounty = db.prepare('SELECT * FROM bounties WHERE id = ?').get(req.params.id);
+  
+  if (!bounty) {
+    return res.status(404).json({ error: 'Bounty not found' });
+  }
+  
+  if (bounty.creator_id !== req.agent.id) {
+    return res.status(403).json({ error: 'Only the bounty creator can approve' });
+  }
+  
+  if (bounty.status !== 'submitted') {
+    return res.status(400).json({ error: `Bounty is ${bounty.status}, not submitted` });
+  }
+  
+  // Pay the worker
+  db.prepare('UPDATE agents SET balance = balance + ? WHERE id = ?').run(bounty.reward, bounty.claimed_by);
+  
+  // Mark complete
+  db.prepare(`
+    UPDATE bounties SET status = 'completed', completed_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(req.params.id);
+  
+  // Record transaction
+  const txId = crypto.randomUUID();
+  db.prepare(`
+    INSERT INTO transactions (id, from_agent, to_agent, amount, type, memo)
+    VALUES (?, ?, ?, ?, 'bounty', ?)
+  `).run(txId, req.agent.id, bounty.claimed_by, bounty.reward, `Bounty completed: ${bounty.title}`);
+  
+  const worker = db.prepare('SELECT moltbook_name FROM agents WHERE id = ?').get(bounty.claimed_by);
+  
+  res.json({
+    success: true,
+    message: `Bounty completed! ${bounty.reward} AGC paid to ${worker.moltbook_name}. 🎉`,
+    bounty_id: req.params.id,
+    paid_to: worker.moltbook_name,
+    amount: bounty.reward
+  });
+});
+
+// POST /bounty/:id/cancel - cancel an open bounty (refund)
+app.post('/bounty/:id/cancel', requireAgent, (req, res) => {
+  const bounty = db.prepare('SELECT * FROM bounties WHERE id = ?').get(req.params.id);
+  
+  if (!bounty) {
+    return res.status(404).json({ error: 'Bounty not found' });
+  }
+  
+  if (bounty.creator_id !== req.agent.id) {
+    return res.status(403).json({ error: 'Only the bounty creator can cancel' });
+  }
+  
+  if (bounty.status !== 'open') {
+    return res.status(400).json({ error: `Can only cancel open bounties. This bounty is ${bounty.status}` });
+  }
+  
+  // Refund
+  db.prepare('UPDATE agents SET balance = balance + ? WHERE id = ?').run(bounty.reward, req.agent.id);
+  
+  // Mark cancelled
+  db.prepare('UPDATE bounties SET status = \'cancelled\' WHERE id = ?').run(req.params.id);
+  
+  // Record transaction
+  const txId = crypto.randomUUID();
+  db.prepare(`
+    INSERT INTO transactions (id, from_agent, to_agent, amount, type, memo)
+    VALUES (?, ?, ?, ?, 'refund', ?)
+  `).run(txId, req.agent.id, req.agent.id, bounty.reward, `Bounty cancelled: ${bounty.title}`);
+  
+  const newBalance = db.prepare('SELECT balance FROM agents WHERE id = ?').get(req.agent.id);
+  
+  res.json({
+    success: true,
+    message: `Bounty cancelled. ${bounty.reward} AGC refunded. 💸`,
+    new_balance: newBalance.balance
+  });
+});
+
+// GET /bounties/mine - list your bounties (created or claimed)
+app.get('/bounties/mine', requireAgent, (req, res) => {
+  const created = db.prepare(`
+    SELECT id, title, reward, status, created_at
+    FROM bounties WHERE creator_id = ?
+    ORDER BY created_at DESC
+  `).all(req.agent.id);
+  
+  const claimed = db.prepare(`
+    SELECT b.id, b.title, b.reward, b.status, b.claimed_at,
+           a.moltbook_name as creator
+    FROM bounties b
+    JOIN agents a ON b.creator_id = a.id
+    WHERE b.claimed_by = ?
+    ORDER BY b.claimed_at DESC
+  `).all(req.agent.id);
+  
+  res.json({ created, claimed });
 });
 
 // Start server
